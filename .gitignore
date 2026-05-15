@@ -1,0 +1,12 @@
+# 配置文件（包含Cookie等敏感信息）
+*.ini
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.iml
