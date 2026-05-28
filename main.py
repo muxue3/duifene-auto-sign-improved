@@ -434,8 +434,10 @@ def toggle_auto_mode():
 
 
 def save_cookie(_x):
+    # 使用 Session 中积累的所有 Cookie，而不是请求头里的 Cookie
+    cookie_str = '; '.join([f"{k}={v}" for k, v in x.cookies.items()])
     config['INFO'] = {
-        'cookie': _x.request.headers.get("cookie")
+        'cookie': cookie_str
     }
     with open(filename, 'w') as f:
         config.write(f)
@@ -459,7 +461,12 @@ def login_link():
     if code is not None:
         x.cookies.clear()
         code = code[0]
+        # 第一步：用 code 换取登录凭证
         _r = x.get(url=host + f"/P.aspx?authtype=1&code={code}&state=1")
+        # 第二步：访问主页激活 Session，让服务器完成身份绑定
+        x.get(url=host + "/_UserCenter/MB/index.aspx")
+        # 第三步：访问课程模块页面
+        x.get(url=host + "/_UserCenter/MB/Module.aspx", headers={"Referer": host + "/_UserCenter/MB/index.aspx"})
         save_cookie(_r)
         success = get_class_list()
         if success:
@@ -490,7 +497,11 @@ def sign(sign_code):
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "Referer": "https://www.duifene.com/_CheckIn/MB/CheckInStudent.aspx?moduleid=16&pasd="
         }
-        params = f"action=studentcheckin&studentid={get_user_id()}&checkincode={sign_code}"
+        uid = get_user_id()
+        if uid is None:
+            text_box.insert(tk.END, "\t获取用户ID失败，请重新登录\n")
+            return False
+        params = f"action=studentcheckin&studentid={uid}&checkincode={sign_code}"
         _r = x.post(
             url=host + "/_CheckIn/CheckIn.ashx", data=params, headers=headers)
         if _r.status_code == 200:
@@ -522,7 +533,11 @@ def sign_location(longitude, latitude):
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Referer": "https://www.duifene.com/_CheckIn/MB/CheckInStudent.aspx?moduleid=16&pasd="
     }
-    params = f"action=signin&sid={get_user_id()}&longitude={longitude}&latitude={latitude}"
+    uid = get_user_id()
+    if uid is None:
+        text_box.insert(tk.END, "\t获取用户ID失败，请重新登录\n")
+        return False
+    params = f"action=signin&sid={uid}&longitude={longitude}&latitude={latitude}"
     _r = x.post(
         url=host + "/_CheckIn/CheckInRoomHandler.ashx", data=params, headers=headers)
     if _r.status_code == 200:
@@ -549,6 +564,11 @@ def watching_sign():
     root.update_idletasks()  # 强制刷新界面
 
     try:
+        # 每2分钟请求一次首页，保持 Session 活跃
+        if course._login_check_counter % 120 == 1:
+            request_with_retry(
+                lambda: x.get(url=host + "/_UserCenter/MB/index.aspx", timeout=10)
+            )
         # 先请求 Module.aspx 激活服务器 session 中的课程信息（每10次请求一次避免频繁）
         if course._login_check_counter % 10 == 1:
             request_with_retry(
@@ -569,11 +589,28 @@ def watching_sign():
                 status = False
                 soup = BeautifulSoup(_r.text, "lxml")
 
-                HFSeconds = soup.find(id="HFSeconds").get("value")
-                HFChecktype = soup.find(id="HFChecktype").get("value")
-                HFCheckInID = soup.find(id="HFCheckInID").get("value")
-                HFClassID = soup.find(id="HFClassID").get("value")
-                if course.class_id == HFClassID or course.class_id in HFClassID.split(','):
+                HFSeconds_el = soup.find(id="HFSeconds")
+                HFChecktype_el = soup.find(id="HFChecktype")
+                if HFSeconds_el is None or HFChecktype_el is None:
+                    text_box.insert(tk.END, "\t页面解析异常，可能登录已过期\n")
+                    if course.flag:
+                        root.after(3000, watching_sign)
+                    return
+                HFSeconds = HFSeconds_el.get("value")
+                HFChecktype = HFChecktype_el.get("value")
+                HFCheckInID_el = soup.find(id="HFCheckInID")
+                HFClassID_el = soup.find(id="HFClassID")
+                if HFCheckInID_el is None or HFClassID_el is None:
+                    if course.flag:
+                        root.after(1000, watching_sign)
+                    return
+                HFCheckInID = HFCheckInID_el.get("value")
+                HFClassID = HFClassID_el.get("value") or ""
+                if not HFCheckInID:
+                    if course.flag:
+                        root.after(1000, watching_sign)
+                    return
+                if not HFClassID or course.class_id == HFClassID or course.class_id in HFClassID.split(','):
                     if HFCheckInID not in course.check_list:
                         # 记录签到首次检测到的时间
                         if HFCheckInID not in course.sign_start_times:
@@ -647,7 +684,9 @@ def watching_sign():
                 else:
                     text_box.insert(tk.END, f"\t 检测到非本班签到")
     except Exception as e:
-        text_box.insert(tk.END, f"\t请求异常: {str(e)[:30]}")
+        import traceback
+        print(traceback.format_exc())  # 完整错误打印到终端
+        text_box.insert(tk.END, f"\t请求异常: {str(e)[:50]}")
 
     if course.flag:
         root.after(1000, watching_sign)
